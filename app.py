@@ -219,7 +219,7 @@ if uploaded_file is not None:
                 df["CO2 C/C0 Plot"] = df["CO2 C/C0"].clip(lower=0, upper=1.2)
                 df["N2 C/C0 Plot"] = df["N2 C/C0"].clip(lower=0, upper=1.2)
 
-                # Simple CO2-only method:
+                # Baseline-corrected CO2-only method:
                 # area = ∫(1 - CO2 C/C0) dt
                 df["CO2 Adsorbed Fraction"] = (1 - df["CO2 C/C0"]).clip(lower=0, upper=1)
 
@@ -256,7 +256,7 @@ if uploaded_file is not None:
                 ax2.plot(
                     df["Elapsed Time (min)"],
                     df["CO2 C/C0 Plot"],
-                    label=f"CO₂: {co2_signal_col}"
+                    label=f"CO₂ baseline-corrected: {co2_signal_col}"
                 )
 
                 if show_n2_curve:
@@ -317,21 +317,28 @@ if uploaded_file is not None:
                 capacity_method = st.selectbox(
                     "Capacity calculation method",
                     [
-                        "Area between N₂ and CO₂ curves",
-                        "CO₂ only: ∫(1 - C/C₀) dt"
+                        "Excel-style CO₂ in/out method",
+                        "Baseline-corrected CO₂-only area method",
+                        "Area between N₂ and CO₂ curves"
                     ],
                     index=0
                 )
 
-                if capacity_method == "Area between N₂ and CO₂ curves":
+                if capacity_method == "Excel-style CO₂ in/out method":
+                    st.write(
+                        "Capacity is calculated using your spreadsheet-style approach: "
+                        "`CO₂ adsorbed = CO₂ in - CO₂ out`, where "
+                        "`C/C₀ = raw CO₂ signal / CO₂eq`."
+                    )
+                elif capacity_method == "Baseline-corrected CO₂-only area method":
                     st.write(
                         "Capacity is calculated using "
-                        "`∫(N₂ normalized curve - CO₂ normalized curve) dt`."
+                        "`∫(1 - baseline-corrected CO₂ C/C₀) dt`."
                     )
                 else:
                     st.write(
                         "Capacity is calculated using "
-                        "`∫(1 - CO₂ C/C₀) dt`."
+                        "`∫(N₂ normalized curve - CO₂ normalized curve) dt`."
                     )
 
                 col1, col2, col3 = st.columns(3)
@@ -372,12 +379,28 @@ if uploaded_file is not None:
                     )
                 )
 
+                if capacity_method == "Excel-style CO₂ in/out method":
+                    co2eq_signal = st.number_input(
+                        "CO₂eq signal value for Excel-style C/C₀",
+                        min_value=0.0000001,
+                        value=float(co2_c0),
+                        step=0.1,
+                        help=(
+                            "This is the CO₂ equilibrium/final signal used in your spreadsheet. "
+                            "For example, if your sheet used CO₂eq = 95.9, enter 95.9 here."
+                        )
+                    )
+
+                    st.caption(
+                        f"Excel-style C/C₀ will be calculated as `{co2_signal_col} / {co2eq_signal:.3g}`."
+                    )
+
                 st.write("Choose when adsorption starts and ends.")
 
                 col1, col2 = st.columns(2)
 
                 with col1:
-                    co2_start_time = st.number_input(
+                    adsorption_start_time = st.number_input(
                         "Adsorption start time, min",
                         min_value=0.0,
                         max_value=max_time,
@@ -392,7 +415,7 @@ if uploaded_file is not None:
                 with col2:
                     adsorption_end_time = st.number_input(
                         "Adsorption end time, min",
-                        min_value=co2_start_time,
+                        min_value=adsorption_start_time,
                         max_value=max_time,
                         value=max_time,
                         step=0.1,
@@ -404,9 +427,9 @@ if uploaded_file is not None:
 
                 integration_range = st.slider(
                     "Fine-tune capacity integration range, min",
-                    min_value=co2_start_time,
+                    min_value=adsorption_start_time,
                     max_value=adsorption_end_time,
-                    value=(co2_start_time, adsorption_end_time),
+                    value=(adsorption_start_time, adsorption_end_time),
                     step=0.1
                 )
 
@@ -419,7 +442,7 @@ if uploaded_file is not None:
 
                 # Correct time so that adsorption start becomes t = 0 for capacity calculation.
                 integration_df["Corrected Time (min)"] = (
-                    integration_df["Elapsed Time (min)"] - co2_start_time
+                    integration_df["Elapsed Time (min)"] - adsorption_start_time
                 )
 
                 if len(integration_df) < 2:
@@ -430,23 +453,9 @@ if uploaded_file is not None:
                     st.warning("CO₂ concentration must be greater than 0.")
                 elif sample_mass_mg <= 0:
                     st.warning("Sample mass must be greater than 0.")
-                elif adsorption_end_time <= co2_start_time:
+                elif adsorption_end_time <= adsorption_start_time:
                     st.warning("Adsorption end time must be after adsorption start time.")
                 else:
-                    time_min = integration_df["Corrected Time (min)"].to_numpy()
-
-                    if capacity_method == "Area between N₂ and CO₂ curves":
-                        integration_signal = integration_df["N2-CO2 Difference"].to_numpy()
-                        area_label = "N₂ - CO₂"
-                        y_label = "N₂ - CO₂ normalized difference"
-                    else:
-                        integration_signal = integration_df["CO2 Adsorbed Fraction"].to_numpy()
-                        area_label = "1 - CO₂ C/C₀"
-                        y_label = "CO₂ adsorbed fraction"
-
-                    # Area has units of minutes because the integrated signal is dimensionless.
-                    area_min = np.trapezoid(integration_signal, time_min)
-
                     # -----------------------------------------------------
                     # Molar flow calculation
                     # -----------------------------------------------------
@@ -458,9 +467,87 @@ if uploaded_file is not None:
                     # of the total molar flow.
                     co2_fraction = co2_percent / 100
                     co2_mol_per_min = total_mol_per_min * co2_fraction
+                    co2_mol_per_sec = co2_mol_per_min / 60
 
                     # Equivalent CO2 sccm is included only for clarity.
                     equivalent_co2_sccm = total_flow_sccm * co2_fraction
+
+                    sample_mass_g = sample_mass_mg / 1000
+
+                    if capacity_method == "Excel-style CO₂ in/out method":
+                        # -------------------------------------------------
+                        # Excel-style method
+                        # -------------------------------------------------
+                        # This follows the spreadsheet approach:
+                        # C/C0 = raw CO2 signal / CO2eq
+                        # CO2 out per interval = inlet CO2 mol/s * C/C0 * delta_t
+                        # CO2 in = inlet CO2 mol/s * total adsorption time
+                        # CO2 adsorbed = CO2 in - CO2 out
+                        # -------------------------------------------------
+
+                        integration_df["Excel C/C0"] = (
+                            integration_df[co2_signal_col] / co2eq_signal
+                        )
+
+                        # Prevent obviously nonphysical negative outlet fractions.
+                        # Values above 1 are kept because some real signals/noise can overshoot.
+                        integration_df["Excel C/C0"] = integration_df["Excel C/C0"].clip(lower=0)
+
+                        corrected_time_sec = (
+                            integration_df["Corrected Time (min)"].to_numpy() * 60
+                        )
+
+                        c_over_c0 = integration_df["Excel C/C0"].to_numpy()
+
+                        # Use actual time spacing between data points.
+                        dt_sec = np.diff(corrected_time_sec)
+
+                        # Use left-endpoint rectangle method to mimic row-by-row Excel summation.
+                        c_over_c0_for_intervals = c_over_c0[:-1]
+
+                        adsorption_duration_sec = corrected_time_sec[-1] - corrected_time_sec[0]
+
+                        total_co2_in_mol = co2_mol_per_sec * adsorption_duration_sec
+                        co2_out_mol = np.sum(co2_mol_per_sec * c_over_c0_for_intervals * dt_sec)
+                        adsorbed_mol = total_co2_in_mol - co2_out_mol
+
+                        # Equivalent area in minutes for comparison with area methods.
+                        area_min = adsorbed_mol / co2_mol_per_min
+
+                        capacity_mmol_g = (adsorbed_mol * 1000) / sample_mass_g
+
+                        method_details = (
+                            f"Total CO₂ in = `{total_co2_in_mol:.3e} mol`  \n"
+                            f"CO₂ out = `{co2_out_mol:.3e} mol`  \n"
+                            f"CO₂ adsorbed = `{adsorbed_mol:.3e} mol`"
+                        )
+
+                        y_label = "Raw CO₂ C/C₀"
+                        plot_signal = integration_df["Excel C/C0"]
+
+                    else:
+                        # -------------------------------------------------
+                        # Area-based methods
+                        # -------------------------------------------------
+
+                        time_min = integration_df["Corrected Time (min)"].to_numpy()
+
+                        if capacity_method == "Area between N₂ and CO₂ curves":
+                            integration_signal = integration_df["N2-CO2 Difference"].to_numpy()
+                            y_label = "N₂ - CO₂ normalized difference"
+                        else:
+                            integration_signal = integration_df["CO2 Adsorbed Fraction"].to_numpy()
+                            y_label = "CO₂ adsorbed fraction"
+
+                        # Area has units of minutes because the integrated signal is dimensionless.
+                        area_min = np.trapezoid(integration_signal, time_min)
+
+                        adsorbed_mol = co2_mol_per_min * area_min
+                        capacity_mmol_g = (adsorbed_mol * 1000) / sample_mass_g
+
+                        method_details = (
+                            f"CO₂ adsorbed = `{adsorbed_mol:.3e} mol`"
+                        )
 
                     st.info(
                         f"Using total gas flow = {total_flow_sccm:.3g} sccm. "
@@ -469,16 +556,12 @@ if uploaded_file is not None:
                         f"CO₂ inlet molar flow = {co2_mol_per_min:.3e} mol/min."
                     )
 
-                    adsorbed_mol = co2_mol_per_min * area_min
-                    sample_mass_g = sample_mass_mg / 1000
-                    capacity_mmol_g = (adsorbed_mol * 1000) / sample_mass_g
-
                     st.subheader("Capacity Results")
 
                     col1, col2, col3 = st.columns(3)
 
                     with col1:
-                        st.metric("Integrated Area", f"{area_min:.3f} min")
+                        st.metric("Equivalent Integrated Area", f"{area_min:.3f} min")
 
                     with col2:
                         st.metric("Adsorbed CO₂", f"{adsorbed_mol * 1000:.3f} mmol")
@@ -488,12 +571,13 @@ if uploaded_file is not None:
 
                     st.write(f"Total molar flow: `{total_mol_per_min:.3e} mol/min`")
                     st.write(f"CO₂ inlet molar flow: `{co2_mol_per_min:.3e} mol/min`")
-                    st.write(f"Adsorption start: `{co2_start_time:.3f} min`")
+                    st.write(f"Adsorption start: `{adsorption_start_time:.3f} min`")
                     st.write(f"Adsorption end: `{adsorption_end_time:.3f} min`")
                     st.write(
                         f"Integrated duration: "
                         f"`{integration_range[1] - integration_range[0]:.3f} min`"
                     )
+                    st.write(method_details)
 
                     st.caption(
                         f"Equivalent CO₂ flow = {equivalent_co2_sccm:.3g} sccm "
@@ -502,7 +586,23 @@ if uploaded_file is not None:
 
                     fig3, ax3 = plt.subplots(figsize=(10, 5))
 
-                    if capacity_method == "Area between N₂ and CO₂ curves":
+                    if capacity_method == "Excel-style CO₂ in/out method":
+                        ax3.plot(
+                            df["Elapsed Time (min)"],
+                            (df[co2_signal_col] / co2eq_signal).clip(lower=0),
+                            label=f"Excel-style CO₂ C/C₀: {co2_signal_col}/{co2eq_signal:.3g}"
+                        )
+
+                        ax3.fill_between(
+                            integration_df["Elapsed Time (min)"],
+                            integration_df["Excel C/C0"],
+                            1,
+                            where=(integration_df["Excel C/C0"] <= 1),
+                            alpha=0.3,
+                            label="Adsorbed fraction area"
+                        )
+
+                    elif capacity_method == "Area between N₂ and CO₂ curves":
                         ax3.plot(
                             df["Elapsed Time (min)"],
                             df["N2 C/C0 Plot"],
@@ -530,7 +630,7 @@ if uploaded_file is not None:
                         ax3.plot(
                             df["Elapsed Time (min)"],
                             df["CO2 Adsorbed Fraction"],
-                            label=area_label
+                            label="1 - baseline-corrected CO₂ C/C₀"
                         )
 
                         ax3.fill_between(
@@ -541,7 +641,7 @@ if uploaded_file is not None:
                         )
 
                     ax3.axvline(
-                        co2_start_time,
+                        adsorption_start_time,
                         linestyle="--",
                         label="Adsorption start"
                     )
@@ -561,9 +661,10 @@ if uploaded_file is not None:
                     st.pyplot(fig3)
 
                     st.info(
-                        "This calculation integrates only between the selected adsorption start "
-                        "and adsorption end times. For publication-quality results, you may still "
-                        "want to compare against a blank/dead-volume run."
+                        "The Excel-style method is intended to match your spreadsheet calculation. "
+                        "If it still differs, check that the CO₂eq value, adsorption start time, "
+                        "adsorption end time, sample mass, molar volume, and gas composition match "
+                        "the spreadsheet exactly."
                     )
 
             except Exception as norm_error:
