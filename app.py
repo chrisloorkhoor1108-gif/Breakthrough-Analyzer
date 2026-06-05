@@ -21,26 +21,22 @@ def read_mass_spec_txt(uploaded_file):
     raw_text = uploaded_file.read().decode("utf-8", errors="replace")
     lines = raw_text.splitlines()
 
-    # Find the scan data section
     scan_start = None
     for i, line in enumerate(lines):
         if "[Scan Data" in line:
-            scan_start = i + 1  # header row is the next line
+            scan_start = i + 1
             break
 
     if scan_start is None:
         raise ValueError("Could not find the [Scan Data] section in this file.")
 
-    # Collect table lines until the next section begins
     table_lines = []
     for line in lines[scan_start:]:
         stripped = line.strip()
 
-        # Stop when another bracketed section starts
         if stripped.startswith('"[') or stripped.startswith("["):
             break
 
-        # Skip empty lines
         if stripped:
             table_lines.append(line)
 
@@ -49,21 +45,14 @@ def read_mass_spec_txt(uploaded_file):
 
     table_text = "\n".join(table_lines)
 
-    # Read tab-separated table
     df = pd.read_csv(StringIO(table_text), sep="\t", quotechar='"')
-
-    # Remove empty columns caused by trailing tabs
     df = df.dropna(axis=1, how="all")
-
-    # Clean column names
     df.columns = [str(col).strip().replace('"', "") for col in df.columns]
 
-    # Convert numeric columns where possible
     for col in df.columns:
         if col != "Time":
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Convert time column
     if "Time" in df.columns:
         df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
         df = df.dropna(subset=["Time"])
@@ -302,7 +291,10 @@ if uploaded_file is not None:
                     min_value=1.0,
                     value=22414.0,
                     step=1.0,
-                    help="22414 mL/mol assumes standard molar volume near STP. Change this if your lab uses a different reference condition."
+                    help=(
+                        "22414 mL/mol assumes standard molar volume near STP. "
+                        "Change this if your lab uses a different reference condition."
+                    )
                 )
 
                 st.write("Choose the time range to integrate for capacity.")
@@ -337,8 +329,27 @@ if uploaded_file is not None:
                     # Area has units of minutes because adsorbed fraction is dimensionless.
                     area_min = np.trapezoid(adsorbed_fraction, time_min)
 
-                    co2_flow_sccm = total_flow_sccm * (co2_percent / 100)
-                    co2_mol_per_min = co2_flow_sccm / molar_volume_ml_per_mol
+                    # -----------------------------------------------------
+                    # Molar flow calculation
+                    # -----------------------------------------------------
+                    # First calculate TOTAL molar flow from total gas flow.
+                    # sccm = mL/min at the selected reference condition.
+                    total_mol_per_min = total_flow_sccm / molar_volume_ml_per_mol
+
+                    # Then calculate CO2 inlet molar flow as the CO2 fraction
+                    # of the total molar flow.
+                    co2_fraction = co2_percent / 100
+                    co2_mol_per_min = total_mol_per_min * co2_fraction
+
+                    # Equivalent CO2 sccm is included only for clarity.
+                    equivalent_co2_sccm = total_flow_sccm * co2_fraction
+
+                    st.info(
+                        f"Using total gas flow = {total_flow_sccm:.4g} sccm. "
+                        f"Total molar flow = {total_mol_per_min:.4e} mol/min. "
+                        f"CO₂ fraction = {co2_fraction:.4g}. "
+                        f"CO₂ inlet molar flow = {co2_mol_per_min:.4e} mol/min."
+                    )
 
                     adsorbed_mol = co2_mol_per_min * area_min
                     sample_mass_g = sample_mass_mg / 1000
@@ -346,19 +357,27 @@ if uploaded_file is not None:
 
                     st.subheader("Capacity Results")
 
-                    col1, col2, col3, col4 = st.columns(4)
+                    col1, col2, col3, col4, col5 = st.columns(5)
 
                     with col1:
                         st.metric("Integrated Area", f"{area_min:.4f} min")
 
                     with col2:
-                        st.metric("CO₂ Flow", f"{co2_flow_sccm:.4g} sccm")
+                        st.metric("Total Molar Flow", f"{total_mol_per_min:.4e} mol/min")
 
                     with col3:
-                        st.metric("Adsorbed CO₂", f"{adsorbed_mol * 1000:.4f} mmol")
+                        st.metric("CO₂ Molar Flow", f"{co2_mol_per_min:.4e} mol/min")
 
                     with col4:
+                        st.metric("Adsorbed CO₂", f"{adsorbed_mol * 1000:.4f} mmol")
+
+                    with col5:
                         st.metric("Capacity", f"{capacity_mmol_g:.4f} mmol/g")
+
+                    st.caption(
+                        f"Equivalent CO₂ flow = {equivalent_co2_sccm:.4g} sccm "
+                        f"from {total_flow_sccm:.4g} sccm total gas at {co2_percent:.4g}% CO₂."
+                    )
 
                     fig3, ax3 = plt.subplots(figsize=(10, 5))
 
@@ -407,4 +426,5 @@ if uploaded_file is not None:
         )
 
     except Exception as e:
+        st.error(f"Something went wrong while reading the file: {e}")
         st.error(f"Something went wrong while reading the file: {e}")
