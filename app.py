@@ -120,10 +120,10 @@ if uploaded_file is not None:
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric("Minimum Signal", f"{df[y_col].min():.4g}")
+            st.metric("Minimum Signal", f"{df[y_col].min():.3g}")
 
         with col2:
-            st.metric("Maximum Signal", f"{df[y_col].max():.4g}")
+            st.metric("Maximum Signal", f"{df[y_col].max():.3g}")
 
         with col3:
             st.metric("Number of Data Points", len(df))
@@ -190,8 +190,8 @@ if uploaded_file is not None:
                 t_50 = find_threshold_time(df, 0.50)
                 t_95 = find_threshold_time(df, 0.95)
 
-                st.write(f"Baseline = `{baseline:.4g}`")
-                st.write(f"C₀ = `{c0:.4g}`")
+                st.write(f"Baseline = `{baseline:.3g}`")
+                st.write(f"C₀ = `{c0:.3g}`")
 
                 show_threshold_lines = st.checkbox(
                     "Show 5%, 50%, and 95% breakthrough lines",
@@ -232,19 +232,19 @@ if uploaded_file is not None:
 
                 with col1:
                     if t_05 is not None:
-                        st.metric("5% Breakthrough Time", f"{t_05:.2f} min")
+                        st.metric("5% Breakthrough Time", f"{t_05:.3f} min")
                     else:
                         st.metric("5% Breakthrough Time", "Not reached")
 
                 with col2:
                     if t_50 is not None:
-                        st.metric("50% Breakthrough Time", f"{t_50:.2f} min")
+                        st.metric("50% Breakthrough Time", f"{t_50:.3f} min")
                     else:
                         st.metric("50% Breakthrough Time", "Not reached")
 
                 with col3:
                     if t_95 is not None:
-                        st.metric("95% Saturation Time", f"{t_95:.2f} min")
+                        st.metric("95% Saturation Time", f"{t_95:.3f} min")
                     else:
                         st.metric("95% Saturation Time", "Not reached")
 
@@ -345,10 +345,10 @@ if uploaded_file is not None:
                     equivalent_co2_sccm = total_flow_sccm * co2_fraction
 
                     st.info(
-                        f"Using total gas flow = {total_flow_sccm:.4g} sccm. "
-                        f"Total molar flow = {total_mol_per_min:.4e} mol/min. "
-                        f"CO₂ fraction = {co2_fraction:.4g}. "
-                        f"CO₂ inlet molar flow = {co2_mol_per_min:.4e} mol/min."
+                        f"Using total gas flow = {total_flow_sccm:.3g} sccm. "
+                        f"Total molar flow = {total_mol_per_min:.3e} mol/min. "
+                        f"CO₂ fraction = {co2_fraction:.3g}. "
+                        f"CO₂ inlet molar flow = {co2_mol_per_min:.3e} mol/min."
                     )
 
                     adsorbed_mol = co2_mol_per_min * area_min
@@ -360,23 +360,23 @@ if uploaded_file is not None:
                     col1, col2, col3, col4, col5 = st.columns(5)
 
                     with col1:
-                        st.metric("Integrated Area", f"{area_min:.4f} min")
+                        st.metric("Integrated Area", f"{area_min:.3f} min")
 
                     with col2:
-                        st.metric("Total Molar Flow", f"{total_mol_per_min:.4e} mol/min")
+                        st.metric("Total Molar Flow", f"{total_mol_per_min:.3e} mol/min")
 
                     with col3:
-                        st.metric("CO₂ Molar Flow", f"{co2_mol_per_min:.4e} mol/min")
+                        st.metric("CO₂ Molar Flow", f"{co2_mol_per_min:.3e} mol/min")
 
                     with col4:
-                        st.metric("Adsorbed CO₂", f"{adsorbed_mol * 1000:.4f} mmol")
+                        st.metric("Adsorbed CO₂", f"{adsorbed_mol * 1000:.3f} mmol")
 
                     with col5:
-                        st.metric("Capacity", f"{capacity_mmol_g:.4f} mmol/g")
+                        st.metric("Capacity", f"{capacity_mmol_g:.3f} mmol/g")
 
                     st.caption(
-                        f"Equivalent CO₂ flow = {equivalent_co2_sccm:.4g} sccm "
-                        f"from {total_flow_sccm:.4g} sccm total gas at {co2_percent:.4g}% CO₂."
+                        f"Equivalent CO₂ flow = {equivalent_co2_sccm:.3g} sccm "
+                        f"from {total_flow_sccm:.3g} sccm total gas at {co2_percent:.3g}% CO₂."
                     )
 
                     fig3, ax3 = plt.subplots(figsize=(10, 5))
@@ -426,5 +426,4 @@ if uploaded_file is not None:
         )
 
     except Exception as e:
-        st.error(f"Something went wrong while reading the file: {e}")
         st.error(f"Something went wrong while reading the file: {e}")
