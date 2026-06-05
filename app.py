@@ -56,9 +56,11 @@ def read_mass_spec_txt(uploaded_file):
     if "Time" in df.columns:
         df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
         df = df.dropna(subset=["Time"])
-        df["Elapsed Time (min)"] = (
-            df["Time"] - df["Time"].iloc[0]
-        ).dt.total_seconds() / 60
+
+        elapsed_seconds = (df["Time"] - df["Time"].iloc[0]).dt.total_seconds()
+
+        df["Elapsed Time (s)"] = elapsed_seconds
+        df["Elapsed Time (min)"] = elapsed_seconds / 60
 
     return df
 
@@ -105,6 +107,15 @@ def find_threshold_time(df, threshold):
     return crossed["Elapsed Time (min)"].iloc[0]
 
 
+def convert_time_for_plot(time_min, graph_time_unit):
+    """
+    Converts time from minutes to the selected graphing unit.
+    """
+    if graph_time_unit == "Seconds":
+        return time_min * 60
+    return time_min
+
+
 if uploaded_file is not None:
     try:
         df = read_mass_spec_txt(uploaded_file)
@@ -125,9 +136,23 @@ if uploaded_file is not None:
 
         y_options = mass_columns + other_numeric_columns
 
+        x_axis_options = []
+
+        if "Elapsed Time (min)" in df.columns:
+            x_axis_options.append("Elapsed Time (min)")
+
+        if "Elapsed Time (s)" in df.columns:
+            x_axis_options.append("Elapsed Time (s)")
+
+        if "Scan" in df.columns:
+            x_axis_options.append("Scan")
+
+        if not x_axis_options:
+            x_axis_options = list(df.columns)
+
         x_col = st.selectbox(
             "X-axis",
-            ["Elapsed Time (min)", "Scan"] if "Elapsed Time (min)" in df.columns else df.columns
+            x_axis_options
         )
 
         y_col = st.selectbox(
@@ -165,6 +190,19 @@ if uploaded_file is not None:
         st.subheader("Normalize Breakthrough Curves")
 
         if "Mass 44" in df.columns and "Elapsed Time (min)" in df.columns:
+            graph_time_unit = st.radio(
+                "Graph time unit",
+                ["Minutes", "Seconds"],
+                horizontal=True
+            )
+
+            if graph_time_unit == "Seconds":
+                graph_time_col = "Elapsed Time (s)"
+                graph_time_label = "Elapsed Time (s)"
+            else:
+                graph_time_col = "Elapsed Time (min)"
+                graph_time_label = "Elapsed Time (min)"
+
             col1, col2 = st.columns(2)
 
             with col1:
@@ -184,6 +222,7 @@ if uploaded_file is not None:
             max_time = float(df["Elapsed Time (min)"].max())
 
             st.write("Choose time ranges for baseline and final outlet concentration.")
+            st.caption("These time inputs are in minutes. The graph can still be displayed in minutes or seconds.")
 
             baseline_range = st.slider(
                 "Baseline region before breakthrough, min",
@@ -254,14 +293,14 @@ if uploaded_file is not None:
                 fig2, ax2 = plt.subplots(figsize=(10, 5))
 
                 ax2.plot(
-                    df["Elapsed Time (min)"],
+                    df[graph_time_col],
                     df["CO2 C/C0 Plot"],
                     label=f"CO₂ baseline-corrected: {co2_signal_col}"
                 )
 
                 if show_n2_curve:
                     ax2.plot(
-                        df["Elapsed Time (min)"],
+                        df[graph_time_col],
                         df["N2 C/C0 Plot"],
                         label=f"N₂ / tracer: {n2_signal_col}"
                     )
@@ -272,13 +311,13 @@ if uploaded_file is not None:
                     ax2.axhline(0.95, linestyle="--", label="95% saturation")
 
                     if t_05 is not None:
-                        ax2.axvline(t_05, linestyle="--")
+                        ax2.axvline(convert_time_for_plot(t_05, graph_time_unit), linestyle="--")
                     if t_50 is not None:
-                        ax2.axvline(t_50, linestyle="--")
+                        ax2.axvline(convert_time_for_plot(t_50, graph_time_unit), linestyle="--")
                     if t_95 is not None:
-                        ax2.axvline(t_95, linestyle="--")
+                        ax2.axvline(convert_time_for_plot(t_95, graph_time_unit), linestyle="--")
 
-                ax2.set_xlabel("Elapsed Time (min)")
+                ax2.set_xlabel(graph_time_label)
                 ax2.set_ylabel("Normalized signal")
                 ax2.set_title("Normalized Breakthrough Curves")
                 ax2.grid(True)
@@ -445,6 +484,10 @@ if uploaded_file is not None:
                     integration_df["Elapsed Time (min)"] - adsorption_start_time
                 )
 
+                integration_df["Corrected Time (s)"] = (
+                    integration_df["Corrected Time (min)"] * 60
+                )
+
                 if len(integration_df) < 2:
                     st.warning("Not enough data points in the selected integration range.")
                 elif total_flow_sccm <= 0:
@@ -459,50 +502,27 @@ if uploaded_file is not None:
                     # -----------------------------------------------------
                     # Molar flow calculation
                     # -----------------------------------------------------
-                    # First calculate TOTAL molar flow from total gas flow.
-                    # sccm = mL/min at the selected reference condition.
                     total_mol_per_min = total_flow_sccm / molar_volume_ml_per_mol
 
-                    # Then calculate CO2 inlet molar flow as the CO2 fraction
-                    # of the total molar flow.
                     co2_fraction = co2_percent / 100
                     co2_mol_per_min = total_mol_per_min * co2_fraction
                     co2_mol_per_sec = co2_mol_per_min / 60
 
-                    # Equivalent CO2 sccm is included only for clarity.
                     equivalent_co2_sccm = total_flow_sccm * co2_fraction
 
                     sample_mass_g = sample_mass_mg / 1000
 
                     if capacity_method == "Excel-style CO₂ in/out method":
-                        # -------------------------------------------------
-                        # Excel-style method
-                        # -------------------------------------------------
-                        # This follows the spreadsheet approach:
-                        # C/C0 = raw CO2 signal / CO2eq
-                        # CO2 out per interval = inlet CO2 mol/s * C/C0 * delta_t
-                        # CO2 in = inlet CO2 mol/s * total adsorption time
-                        # CO2 adsorbed = CO2 in - CO2 out
-                        # -------------------------------------------------
-
                         integration_df["Excel C/C0"] = (
                             integration_df[co2_signal_col] / co2eq_signal
                         )
 
-                        # Prevent obviously nonphysical negative outlet fractions.
-                        # Values above 1 are kept because some real signals/noise can overshoot.
                         integration_df["Excel C/C0"] = integration_df["Excel C/C0"].clip(lower=0)
 
-                        corrected_time_sec = (
-                            integration_df["Corrected Time (min)"].to_numpy() * 60
-                        )
-
+                        corrected_time_sec = integration_df["Corrected Time (s)"].to_numpy()
                         c_over_c0 = integration_df["Excel C/C0"].to_numpy()
 
-                        # Use actual time spacing between data points.
                         dt_sec = np.diff(corrected_time_sec)
-
-                        # Use left-endpoint rectangle method to mimic row-by-row Excel summation.
                         c_over_c0_for_intervals = c_over_c0[:-1]
 
                         adsorption_duration_sec = corrected_time_sec[-1] - corrected_time_sec[0]
@@ -511,9 +531,7 @@ if uploaded_file is not None:
                         co2_out_mol = np.sum(co2_mol_per_sec * c_over_c0_for_intervals * dt_sec)
                         adsorbed_mol = total_co2_in_mol - co2_out_mol
 
-                        # Equivalent area in minutes for comparison with area methods.
                         area_min = adsorbed_mol / co2_mol_per_min
-
                         capacity_mmol_g = (adsorbed_mol * 1000) / sample_mass_g
 
                         method_details = (
@@ -523,13 +541,8 @@ if uploaded_file is not None:
                         )
 
                         y_label = "Raw CO₂ C/C₀"
-                        plot_signal = integration_df["Excel C/C0"]
 
                     else:
-                        # -------------------------------------------------
-                        # Area-based methods
-                        # -------------------------------------------------
-
                         time_min = integration_df["Corrected Time (min)"].to_numpy()
 
                         if capacity_method == "Area between N₂ and CO₂ curves":
@@ -539,7 +552,6 @@ if uploaded_file is not None:
                             integration_signal = integration_df["CO2 Adsorbed Fraction"].to_numpy()
                             y_label = "CO₂ adsorbed fraction"
 
-                        # Area has units of minutes because the integrated signal is dimensionless.
                         area_min = np.trapezoid(integration_signal, time_min)
 
                         adsorbed_mol = co2_mol_per_min * area_min
@@ -586,15 +598,25 @@ if uploaded_file is not None:
 
                     fig3, ax3 = plt.subplots(figsize=(10, 5))
 
+                    adsorption_start_plot = convert_time_for_plot(
+                        adsorption_start_time,
+                        graph_time_unit
+                    )
+
+                    adsorption_end_plot = convert_time_for_plot(
+                        adsorption_end_time,
+                        graph_time_unit
+                    )
+
                     if capacity_method == "Excel-style CO₂ in/out method":
                         ax3.plot(
-                            df["Elapsed Time (min)"],
+                            df[graph_time_col],
                             (df[co2_signal_col] / co2eq_signal).clip(lower=0),
                             label=f"Excel-style CO₂ C/C₀: {co2_signal_col}/{co2eq_signal:.3g}"
                         )
 
                         ax3.fill_between(
-                            integration_df["Elapsed Time (min)"],
+                            integration_df[graph_time_col],
                             integration_df["Excel C/C0"],
                             1,
                             where=(integration_df["Excel C/C0"] <= 1),
@@ -604,19 +626,19 @@ if uploaded_file is not None:
 
                     elif capacity_method == "Area between N₂ and CO₂ curves":
                         ax3.plot(
-                            df["Elapsed Time (min)"],
+                            df[graph_time_col],
                             df["N2 C/C0 Plot"],
                             label=f"N₂ / tracer: {n2_signal_col}"
                         )
 
                         ax3.plot(
-                            df["Elapsed Time (min)"],
+                            df[graph_time_col],
                             df["CO2 C/C0 Plot"],
                             label=f"CO₂: {co2_signal_col}"
                         )
 
                         ax3.fill_between(
-                            integration_df["Elapsed Time (min)"],
+                            integration_df[graph_time_col],
                             integration_df["CO2 C/C0"].clip(lower=0, upper=1.2),
                             integration_df["N2 C/C0"].clip(lower=0, upper=1.2),
                             where=(
@@ -628,31 +650,31 @@ if uploaded_file is not None:
 
                     else:
                         ax3.plot(
-                            df["Elapsed Time (min)"],
+                            df[graph_time_col],
                             df["CO2 Adsorbed Fraction"],
                             label="1 - baseline-corrected CO₂ C/C₀"
                         )
 
                         ax3.fill_between(
-                            integration_df["Elapsed Time (min)"],
+                            integration_df[graph_time_col],
                             integration_df["CO2 Adsorbed Fraction"],
                             alpha=0.3,
                             label="Integrated area"
                         )
 
                     ax3.axvline(
-                        adsorption_start_time,
+                        adsorption_start_plot,
                         linestyle="--",
                         label="Adsorption start"
                     )
 
                     ax3.axvline(
-                        adsorption_end_time,
+                        adsorption_end_plot,
                         linestyle="--",
                         label="Adsorption end"
                     )
 
-                    ax3.set_xlabel("Elapsed Time (min)")
+                    ax3.set_xlabel(graph_time_label)
                     ax3.set_ylabel(y_label)
                     ax3.set_title("Capacity Integration Area")
                     ax3.grid(True)
@@ -661,10 +683,9 @@ if uploaded_file is not None:
                     st.pyplot(fig3)
 
                     st.info(
-                        "The Excel-style method is intended to match your spreadsheet calculation. "
-                        "If it still differs, check that the CO₂eq value, adsorption start time, "
-                        "adsorption end time, sample mass, molar volume, and gas composition match "
-                        "the spreadsheet exactly."
+                        "The graph can now be displayed in minutes or seconds. "
+                        "The capacity calculation still uses the selected adsorption start/end times "
+                        "internally in minutes, with seconds used where needed for the Excel-style method."
                     )
 
             except Exception as norm_error:
