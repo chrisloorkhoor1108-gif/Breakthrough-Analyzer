@@ -357,22 +357,19 @@ if uploaded_file is not None:
 
                     st.subheader("Capacity Results")
 
-                    col1, col2, col3, col4, col5 = st.columns(5)
+                    col1, col2, col3 = st.columns(3)
 
                     with col1:
                         st.metric("Integrated Area", f"{area_min:.3f} min")
 
                     with col2:
-                        st.metric("Total Molar Flow", f"{total_mol_per_min:.3e} mol/min")
-
-                    with col3:
-                        st.metric("CO₂ Molar Flow", f"{co2_mol_per_min:.3e} mol/min")
-
-                    with col4:
                         st.metric("Adsorbed CO₂", f"{adsorbed_mol * 1000:.3f} mmol")
 
-                    with col5:
+                    with col3:
                         st.metric("Capacity", f"{capacity_mmol_g:.3f} mmol/g")
+
+                    st.write(f"Total molar flow: `{total_mol_per_min:.3e} mol/min`")
+                    st.write(f"CO₂ inlet molar flow: `{co2_mol_per_min:.3e} mol/min`")
 
                     st.caption(
                         f"Equivalent CO₂ flow = {equivalent_co2_sccm:.3g} sccm "
