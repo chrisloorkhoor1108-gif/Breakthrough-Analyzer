@@ -10,6 +10,7 @@ st.write("Upload a mass spec `.txt` file exported from Process Eye / Spectra Int
 
 uploaded_file = st.file_uploader("Upload your mass spec TXT file", type=["txt"])
 
+
 def read_mass_spec_txt(uploaded_file):
     """
     Reads a Process Eye / Spectra International TXT export.
@@ -65,9 +66,23 @@ def read_mass_spec_txt(uploaded_file):
     if "Time" in df.columns:
         df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
         df = df.dropna(subset=["Time"])
-        df["Elapsed Time (min)"] = (df["Time"] - df["Time"].iloc[0]).dt.total_seconds() / 60
+        df["Elapsed Time (min)"] = (
+            df["Time"] - df["Time"].iloc[0]
+        ).dt.total_seconds() / 60
 
     return df
+
+
+def find_threshold_time(df, threshold):
+    """
+    Finds the first elapsed time where C/C0 reaches or exceeds a threshold.
+    """
+    crossed = df[df["C/C0"] >= threshold]
+
+    if crossed.empty:
+        return None
+
+    return crossed["Elapsed Time (min)"].iloc[0]
 
 
 if uploaded_file is not None:
@@ -82,6 +97,7 @@ if uploaded_file is not None:
         st.subheader("Select Signal to Plot")
 
         mass_columns = [col for col in df.columns if col.startswith("Mass")]
+
         other_numeric_columns = [
             col for col in df.select_dtypes(include="number").columns
             if col not in mass_columns
@@ -108,6 +124,23 @@ if uploaded_file is not None:
         ax.grid(True)
 
         st.pyplot(fig)
+
+        st.subheader("Basic Signal Information")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric("Minimum Signal", f"{df[y_col].min():.4g}")
+
+        with col2:
+            st.metric("Maximum Signal", f"{df[y_col].max():.4g}")
+
+        with col3:
+            st.metric("Number of Data Points", len(df))
+
+        # ---------------------------------------------------------
+        # NORMALIZED BREAKTHROUGH CURVE SECTION
+        # ---------------------------------------------------------
 
         st.subheader("Normalize Breakthrough Curve")
 
@@ -151,40 +184,74 @@ if uploaded_file is not None:
             baseline = df.loc[baseline_mask, signal_col].mean()
             c0 = df.loc[c0_mask, signal_col].mean()
 
-            df["C/C0"] = (df[signal_col] - baseline) / (c0 - baseline)
-            df["C/C0"] = df["C/C0"].clip(lower=0, upper=1.2)
+            if c0 == baseline:
+                st.error("C₀ and baseline are equal, so C/C₀ cannot be calculated.")
+            else:
+                df["C/C0"] = (df[signal_col] - baseline) / (c0 - baseline)
+                df["C/C0"] = df["C/C0"].clip(lower=0, upper=1.2)
 
-            st.write(f"Baseline = `{baseline:.4g}`")
-            st.write(f"C₀ = `{c0:.4g}`")
+                t_05 = find_threshold_time(df, 0.05)
+                t_50 = find_threshold_time(df, 0.50)
+                t_95 = find_threshold_time(df, 0.95)
 
-            fig2, ax2 = plt.subplots(figsize=(10, 5))
-            ax2.plot(df["Elapsed Time (min)"], df["C/C0"])
-            ax2.axhline(0.05, linestyle="--", label="5% breakthrough")
-            ax2.axhline(0.50, linestyle="--", label="50% breakthrough")
-            ax2.axhline(0.95, linestyle="--", label="95% saturation")
-            ax2.set_xlabel("Elapsed Time (min)")
-            ax2.set_ylabel("C/C₀")
-            ax2.set_title(f"Normalized Breakthrough Curve: {signal_col}")
-            ax2.grid(True)
-            ax2.legend()
+                st.write(f"Baseline = `{baseline:.4g}`")
+                st.write(f"C₀ = `{c0:.4g}`")
 
-            st.pyplot(fig2)
+                fig2, ax2 = plt.subplots(figsize=(10, 5))
+
+                ax2.plot(
+                    df["Elapsed Time (min)"],
+                    df["C/C0"],
+                    label="C/C₀"
+                )
+
+                ax2.axhline(0.05, linestyle="--", label="5% breakthrough")
+                ax2.axhline(0.50, linestyle="--", label="50% breakthrough")
+                ax2.axhline(0.95, linestyle="--", label="95% saturation")
+
+                if t_05 is not None:
+                    ax2.axvline(t_05, linestyle="--")
+                if t_50 is not None:
+                    ax2.axvline(t_50, linestyle="--")
+                if t_95 is not None:
+                    ax2.axvline(t_95, linestyle="--")
+
+                ax2.set_xlabel("Elapsed Time (min)")
+                ax2.set_ylabel("C/C₀")
+                ax2.set_title(f"Normalized Breakthrough Curve: {signal_col}")
+                ax2.grid(True)
+                ax2.legend()
+
+                st.pyplot(fig2)
+
+                st.subheader("Breakthrough Time Results")
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    if t_05 is not None:
+                        st.metric("5% Breakthrough Time", f"{t_05:.2f} min")
+                    else:
+                        st.metric("5% Breakthrough Time", "Not reached")
+
+                with col2:
+                    if t_50 is not None:
+                        st.metric("50% Breakthrough Time", f"{t_50:.2f} min")
+                    else:
+                        st.metric("50% Breakthrough Time", "Not reached")
+
+                with col3:
+                    if t_95 is not None:
+                        st.metric("95% Saturation Time", f"{t_95:.2f} min")
+                    else:
+                        st.metric("95% Saturation Time", "Not reached")
 
         else:
             st.warning("Mass 44 or elapsed time was not found in this file.")
 
-        st.subheader("Basic Signal Information")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.metric("Minimum Signal", f"{df[y_col].min():.4g}")
-
-        with col2:
-            st.metric("Maximum Signal", f"{df[y_col].max():.4g}")
-
-        with col3:
-            st.metric("Number of Data Points", len(df))
+        # ---------------------------------------------------------
+        # DOWNLOAD CLEANED DATA
+        # ---------------------------------------------------------
 
         st.subheader("Download Cleaned Data")
 
