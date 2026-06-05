@@ -116,6 +116,99 @@ def convert_time_for_plot(time_min, graph_time_unit):
     return time_min
 
 
+def calculate_cycle_capacity(
+    df,
+    start_time,
+    end_time,
+    capacity_method,
+    co2_signal_col,
+    co2eq_signal,
+    total_flow_sccm,
+    co2_percent,
+    sample_mass_mg,
+    molar_volume_ml_per_mol
+):
+    """
+    Calculates capacity for one adsorption cycle.
+    Returns a dictionary of results.
+    """
+
+    cycle_mask = (
+        (df["Elapsed Time (min)"] >= start_time) &
+        (df["Elapsed Time (min)"] <= end_time)
+    )
+
+    cycle_df = df.loc[cycle_mask].copy()
+
+    if len(cycle_df) < 2:
+        return None
+
+    cycle_df["Corrected Time (min)"] = cycle_df["Elapsed Time (min)"] - start_time
+    cycle_df["Corrected Time (s)"] = cycle_df["Corrected Time (min)"] * 60
+
+    total_mol_per_min = total_flow_sccm / molar_volume_ml_per_mol
+    co2_fraction = co2_percent / 100
+    co2_mol_per_min = total_mol_per_min * co2_fraction
+    co2_mol_per_sec = co2_mol_per_min / 60
+
+    sample_mass_g = sample_mass_mg / 1000
+
+    if capacity_method == "Excel-style CO₂ in/out method":
+        cycle_df["Excel C/C0"] = cycle_df[co2_signal_col] / co2eq_signal
+        cycle_df["Excel C/C0"] = cycle_df["Excel C/C0"].clip(lower=0)
+
+        corrected_time_sec = cycle_df["Corrected Time (s)"].to_numpy()
+        c_over_c0 = cycle_df["Excel C/C0"].to_numpy()
+
+        dt_sec = np.diff(corrected_time_sec)
+        c_over_c0_for_intervals = c_over_c0[:-1]
+
+        adsorption_duration_sec = corrected_time_sec[-1] - corrected_time_sec[0]
+
+        total_co2_in_mol = co2_mol_per_sec * adsorption_duration_sec
+        co2_out_mol = np.sum(co2_mol_per_sec * c_over_c0_for_intervals * dt_sec)
+        adsorbed_mol = total_co2_in_mol - co2_out_mol
+
+        area_min = adsorbed_mol / co2_mol_per_min
+
+    elif capacity_method == "Baseline-corrected CO₂-only area method":
+        time_min = cycle_df["Corrected Time (min)"].to_numpy()
+        integration_signal = cycle_df["CO2 Adsorbed Fraction"].to_numpy()
+
+        area_min = np.trapezoid(integration_signal, time_min)
+        adsorbed_mol = co2_mol_per_min * area_min
+
+        total_co2_in_mol = np.nan
+        co2_out_mol = np.nan
+
+    else:
+        time_min = cycle_df["Corrected Time (min)"].to_numpy()
+        integration_signal = cycle_df["N2-CO2 Difference"].to_numpy()
+
+        area_min = np.trapezoid(integration_signal, time_min)
+        adsorbed_mol = co2_mol_per_min * area_min
+
+        total_co2_in_mol = np.nan
+        co2_out_mol = np.nan
+
+    capacity_mmol_g = (adsorbed_mol * 1000) / sample_mass_g
+
+    return {
+        "cycle_df": cycle_df,
+        "start_time_min": start_time,
+        "end_time_min": end_time,
+        "duration_min": end_time - start_time,
+        "area_min": area_min,
+        "total_co2_in_mol": total_co2_in_mol,
+        "co2_out_mol": co2_out_mol,
+        "adsorbed_mol": adsorbed_mol,
+        "capacity_mmol_g": capacity_mmol_g,
+        "total_mol_per_min": total_mol_per_min,
+        "co2_mol_per_min": co2_mol_per_min,
+        "co2_fraction": co2_fraction
+    }
+
+
 if uploaded_file is not None:
     try:
         df = read_mass_spec_txt(uploaded_file)
@@ -258,12 +351,8 @@ if uploaded_file is not None:
                 df["CO2 C/C0 Plot"] = df["CO2 C/C0"].clip(lower=0, upper=1.2)
                 df["N2 C/C0 Plot"] = df["N2 C/C0"].clip(lower=0, upper=1.2)
 
-                # Baseline-corrected CO2-only method:
-                # area = ∫(1 - CO2 C/C0) dt
                 df["CO2 Adsorbed Fraction"] = (1 - df["CO2 C/C0"]).clip(lower=0, upper=1)
 
-                # N2 tracer method:
-                # area = ∫(N2 normalized curve - CO2 normalized curve) dt
                 df["N2-CO2 Difference"] = (df["N2 C/C0"] - df["CO2 C/C0"]).clip(lower=0)
 
                 t_05 = find_threshold_time(df, 0.05)
@@ -353,6 +442,12 @@ if uploaded_file is not None:
 
                 st.subheader("CO₂ Adsorption Capacity Calculation")
 
+                analysis_mode = st.radio(
+                    "Analysis mode",
+                    ["Single adsorption cycle", "Multiple adsorption cycles"],
+                    horizontal=True
+                )
+
                 capacity_method = st.selectbox(
                     "Capacity calculation method",
                     [
@@ -433,133 +528,21 @@ if uploaded_file is not None:
                     st.caption(
                         f"Excel-style C/C₀ will be calculated as `{co2_signal_col} / {co2eq_signal:.3g}`."
                     )
-
-                st.write("Choose when adsorption starts and ends.")
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    adsorption_start_time = st.number_input(
-                        "Adsorption start time, min",
-                        min_value=0.0,
-                        max_value=max_time,
-                        value=0.0,
-                        step=0.1,
-                        help=(
-                            "Set this to the time when CO₂ actually started entering the bed. "
-                            "Time before this will not count toward capacity."
-                        )
-                    )
-
-                with col2:
-                    adsorption_end_time = st.number_input(
-                        "Adsorption end time, min",
-                        min_value=adsorption_start_time,
-                        max_value=max_time,
-                        value=max_time,
-                        step=0.1,
-                        help=(
-                            "Set this to the time when adsorption ended. "
-                            "Time after this will not count toward capacity."
-                        )
-                    )
-
-                integration_range = st.slider(
-                    "Fine-tune capacity integration range, min",
-                    min_value=adsorption_start_time,
-                    max_value=adsorption_end_time,
-                    value=(adsorption_start_time, adsorption_end_time),
-                    step=0.1
-                )
-
-                integration_mask = (
-                    (df["Elapsed Time (min)"] >= integration_range[0]) &
-                    (df["Elapsed Time (min)"] <= integration_range[1])
-                )
-
-                integration_df = df.loc[integration_mask].copy()
-
-                # Correct time so that adsorption start becomes t = 0 for capacity calculation.
-                integration_df["Corrected Time (min)"] = (
-                    integration_df["Elapsed Time (min)"] - adsorption_start_time
-                )
-
-                integration_df["Corrected Time (s)"] = (
-                    integration_df["Corrected Time (min)"] * 60
-                )
-
-                if len(integration_df) < 2:
-                    st.warning("Not enough data points in the selected integration range.")
-                elif total_flow_sccm <= 0:
-                    st.warning("Total flow rate must be greater than 0.")
-                elif co2_percent <= 0:
-                    st.warning("CO₂ concentration must be greater than 0.")
-                elif sample_mass_mg <= 0:
-                    st.warning("Sample mass must be greater than 0.")
-                elif adsorption_end_time <= adsorption_start_time:
-                    st.warning("Adsorption end time must be after adsorption start time.")
                 else:
-                    # -----------------------------------------------------
-                    # Molar flow calculation
-                    # -----------------------------------------------------
-                    total_mol_per_min = total_flow_sccm / molar_volume_ml_per_mol
+                    co2eq_signal = float(co2_c0)
 
+                if (
+                    total_flow_sccm <= 0 or
+                    co2_percent <= 0 or
+                    sample_mass_mg <= 0 or
+                    molar_volume_ml_per_mol <= 0
+                ):
+                    st.warning("Flow rate, CO₂ concentration, sample mass, and molar volume must all be greater than 0.")
+                else:
+                    total_mol_per_min = total_flow_sccm / molar_volume_ml_per_mol
                     co2_fraction = co2_percent / 100
                     co2_mol_per_min = total_mol_per_min * co2_fraction
-                    co2_mol_per_sec = co2_mol_per_min / 60
-
                     equivalent_co2_sccm = total_flow_sccm * co2_fraction
-
-                    sample_mass_g = sample_mass_mg / 1000
-
-                    if capacity_method == "Excel-style CO₂ in/out method":
-                        integration_df["Excel C/C0"] = (
-                            integration_df[co2_signal_col] / co2eq_signal
-                        )
-
-                        integration_df["Excel C/C0"] = integration_df["Excel C/C0"].clip(lower=0)
-
-                        corrected_time_sec = integration_df["Corrected Time (s)"].to_numpy()
-                        c_over_c0 = integration_df["Excel C/C0"].to_numpy()
-
-                        dt_sec = np.diff(corrected_time_sec)
-                        c_over_c0_for_intervals = c_over_c0[:-1]
-
-                        adsorption_duration_sec = corrected_time_sec[-1] - corrected_time_sec[0]
-
-                        total_co2_in_mol = co2_mol_per_sec * adsorption_duration_sec
-                        co2_out_mol = np.sum(co2_mol_per_sec * c_over_c0_for_intervals * dt_sec)
-                        adsorbed_mol = total_co2_in_mol - co2_out_mol
-
-                        area_min = adsorbed_mol / co2_mol_per_min
-                        capacity_mmol_g = (adsorbed_mol * 1000) / sample_mass_g
-
-                        method_details = (
-                            f"Total CO₂ in = `{total_co2_in_mol:.3e} mol`  \n"
-                            f"CO₂ out = `{co2_out_mol:.3e} mol`  \n"
-                            f"CO₂ adsorbed = `{adsorbed_mol:.3e} mol`"
-                        )
-
-                        y_label = "Raw CO₂ C/C₀"
-
-                    else:
-                        time_min = integration_df["Corrected Time (min)"].to_numpy()
-
-                        if capacity_method == "Area between N₂ and CO₂ curves":
-                            integration_signal = integration_df["N2-CO2 Difference"].to_numpy()
-                            y_label = "N₂ - CO₂ normalized difference"
-                        else:
-                            integration_signal = integration_df["CO2 Adsorbed Fraction"].to_numpy()
-                            y_label = "CO₂ adsorbed fraction"
-
-                        area_min = np.trapezoid(integration_signal, time_min)
-
-                        adsorbed_mol = co2_mol_per_min * area_min
-                        capacity_mmol_g = (adsorbed_mol * 1000) / sample_mass_g
-
-                        method_details = (
-                            f"CO₂ adsorbed = `{adsorbed_mol:.3e} mol`"
-                        )
 
                     st.info(
                         f"Using total gas flow = {total_flow_sccm:.3g} sccm. "
@@ -568,125 +551,416 @@ if uploaded_file is not None:
                         f"CO₂ inlet molar flow = {co2_mol_per_min:.3e} mol/min."
                     )
 
-                    st.subheader("Capacity Results")
+                    # ---------------------------------------------------------
+                    # SINGLE CYCLE MODE
+                    # ---------------------------------------------------------
 
-                    col1, col2, col3 = st.columns(3)
+                    if analysis_mode == "Single adsorption cycle":
+                        st.write("Choose when adsorption starts and ends.")
 
-                    with col1:
-                        st.metric("Equivalent Integrated Area", f"{area_min:.3f} min")
+                        col1, col2 = st.columns(2)
 
-                    with col2:
-                        st.metric("Adsorbed CO₂", f"{adsorbed_mol * 1000:.3f} mmol")
+                        with col1:
+                            adsorption_start_time = st.number_input(
+                                "Adsorption start time, min",
+                                min_value=0.0,
+                                max_value=max_time,
+                                value=0.0,
+                                step=0.1,
+                                help=(
+                                    "Set this to the time when CO₂ actually started entering the bed. "
+                                    "Time before this will not count toward capacity."
+                                )
+                            )
 
-                    with col3:
-                        st.metric("Capacity", f"{capacity_mmol_g:.3f} mmol/g")
+                        with col2:
+                            adsorption_end_time = st.number_input(
+                                "Adsorption end time, min",
+                                min_value=adsorption_start_time,
+                                max_value=max_time,
+                                value=max_time,
+                                step=0.1,
+                                help=(
+                                    "Set this to the time when adsorption ended. "
+                                    "Time after this will not count toward capacity."
+                                )
+                            )
 
-                    st.write(f"Total molar flow: `{total_mol_per_min:.3e} mol/min`")
-                    st.write(f"CO₂ inlet molar flow: `{co2_mol_per_min:.3e} mol/min`")
-                    st.write(f"Adsorption start: `{adsorption_start_time:.3f} min`")
-                    st.write(f"Adsorption end: `{adsorption_end_time:.3f} min`")
-                    st.write(
-                        f"Integrated duration: "
-                        f"`{integration_range[1] - integration_range[0]:.3f} min`"
-                    )
-                    st.write(method_details)
-
-                    st.caption(
-                        f"Equivalent CO₂ flow = {equivalent_co2_sccm:.3g} sccm "
-                        f"from {total_flow_sccm:.3g} sccm total gas at {co2_percent:.3g}% CO₂."
-                    )
-
-                    fig3, ax3 = plt.subplots(figsize=(10, 5))
-
-                    adsorption_start_plot = convert_time_for_plot(
-                        adsorption_start_time,
-                        graph_time_unit
-                    )
-
-                    adsorption_end_plot = convert_time_for_plot(
-                        adsorption_end_time,
-                        graph_time_unit
-                    )
-
-                    if capacity_method == "Excel-style CO₂ in/out method":
-                        ax3.plot(
-                            df[graph_time_col],
-                            (df[co2_signal_col] / co2eq_signal).clip(lower=0),
-                            label=f"Excel-style CO₂ C/C₀: {co2_signal_col}/{co2eq_signal:.3g}"
+                        integration_range = st.slider(
+                            "Fine-tune capacity integration range, min",
+                            min_value=adsorption_start_time,
+                            max_value=adsorption_end_time,
+                            value=(adsorption_start_time, adsorption_end_time),
+                            step=0.1
                         )
 
-                        ax3.fill_between(
-                            integration_df[graph_time_col],
-                            integration_df["Excel C/C0"],
-                            1,
-                            where=(integration_df["Excel C/C0"] <= 1),
-                            alpha=0.3,
-                            label="Adsorbed fraction area"
+                        result = calculate_cycle_capacity(
+                            df=df,
+                            start_time=integration_range[0],
+                            end_time=integration_range[1],
+                            capacity_method=capacity_method,
+                            co2_signal_col=co2_signal_col,
+                            co2eq_signal=co2eq_signal,
+                            total_flow_sccm=total_flow_sccm,
+                            co2_percent=co2_percent,
+                            sample_mass_mg=sample_mass_mg,
+                            molar_volume_ml_per_mol=molar_volume_ml_per_mol
                         )
 
-                    elif capacity_method == "Area between N₂ and CO₂ curves":
-                        ax3.plot(
-                            df[graph_time_col],
-                            df["N2 C/C0 Plot"],
-                            label=f"N₂ / tracer: {n2_signal_col}"
-                        )
+                        if result is None:
+                            st.warning("Not enough data points in the selected integration range.")
+                        else:
+                            integration_df = result["cycle_df"]
 
-                        ax3.plot(
-                            df[graph_time_col],
-                            df["CO2 C/C0 Plot"],
-                            label=f"CO₂: {co2_signal_col}"
-                        )
+                            st.subheader("Capacity Results")
 
-                        ax3.fill_between(
-                            integration_df[graph_time_col],
-                            integration_df["CO2 C/C0"].clip(lower=0, upper=1.2),
-                            integration_df["N2 C/C0"].clip(lower=0, upper=1.2),
-                            where=(
-                                integration_df["N2 C/C0"] >= integration_df["CO2 C/C0"]
-                            ),
-                            alpha=0.3,
-                            label="Integrated area between curves"
-                        )
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                st.metric("Equivalent Integrated Area", f"{result['area_min']:.3f} min")
+
+                            with col2:
+                                st.metric("Adsorbed CO₂", f"{result['adsorbed_mol'] * 1000:.3f} mmol")
+
+                            with col3:
+                                st.metric("Capacity", f"{result['capacity_mmol_g']:.3f} mmol/g")
+
+                            st.write(f"Total molar flow: `{result['total_mol_per_min']:.3e} mol/min`")
+                            st.write(f"CO₂ inlet molar flow: `{result['co2_mol_per_min']:.3e} mol/min`")
+                            st.write(f"Adsorption start: `{integration_range[0]:.3f} min`")
+                            st.write(f"Adsorption end: `{integration_range[1]:.3f} min`")
+                            st.write(f"Integrated duration: `{integration_range[1] - integration_range[0]:.3f} min`")
+
+                            if capacity_method == "Excel-style CO₂ in/out method":
+                                st.write(f"Total CO₂ in = `{result['total_co2_in_mol']:.3e} mol`")
+                                st.write(f"CO₂ out = `{result['co2_out_mol']:.3e} mol`")
+                                st.write(f"CO₂ adsorbed = `{result['adsorbed_mol']:.3e} mol`")
+                            else:
+                                st.write(f"CO₂ adsorbed = `{result['adsorbed_mol']:.3e} mol`")
+
+                            st.caption(
+                                f"Equivalent CO₂ flow = {equivalent_co2_sccm:.3g} sccm "
+                                f"from {total_flow_sccm:.3g} sccm total gas at {co2_percent:.3g}% CO₂."
+                            )
+
+                            fig3, ax3 = plt.subplots(figsize=(10, 5))
+
+                            adsorption_start_plot = convert_time_for_plot(
+                                integration_range[0],
+                                graph_time_unit
+                            )
+
+                            adsorption_end_plot = convert_time_for_plot(
+                                integration_range[1],
+                                graph_time_unit
+                            )
+
+                            if capacity_method == "Excel-style CO₂ in/out method":
+                                ax3.plot(
+                                    df[graph_time_col],
+                                    (df[co2_signal_col] / co2eq_signal).clip(lower=0),
+                                    label=f"Excel-style CO₂ C/C₀: {co2_signal_col}/{co2eq_signal:.3g}"
+                                )
+
+                                ax3.fill_between(
+                                    integration_df[graph_time_col],
+                                    integration_df["Excel C/C0"],
+                                    1,
+                                    where=(integration_df["Excel C/C0"] <= 1),
+                                    alpha=0.3,
+                                    label="Adsorbed fraction area"
+                                )
+
+                                y_label = "Raw CO₂ C/C₀"
+
+                            elif capacity_method == "Area between N₂ and CO₂ curves":
+                                ax3.plot(
+                                    df[graph_time_col],
+                                    df["N2 C/C0 Plot"],
+                                    label=f"N₂ / tracer: {n2_signal_col}"
+                                )
+
+                                ax3.plot(
+                                    df[graph_time_col],
+                                    df["CO2 C/C0 Plot"],
+                                    label=f"CO₂: {co2_signal_col}"
+                                )
+
+                                ax3.fill_between(
+                                    integration_df[graph_time_col],
+                                    integration_df["CO2 C/C0"].clip(lower=0, upper=1.2),
+                                    integration_df["N2 C/C0"].clip(lower=0, upper=1.2),
+                                    where=(
+                                        integration_df["N2 C/C0"] >= integration_df["CO2 C/C0"]
+                                    ),
+                                    alpha=0.3,
+                                    label="Integrated area between curves"
+                                )
+
+                                y_label = "N₂ - CO₂ normalized difference"
+
+                            else:
+                                ax3.plot(
+                                    df[graph_time_col],
+                                    df["CO2 Adsorbed Fraction"],
+                                    label="1 - baseline-corrected CO₂ C/C₀"
+                                )
+
+                                ax3.fill_between(
+                                    integration_df[graph_time_col],
+                                    integration_df["CO2 Adsorbed Fraction"],
+                                    alpha=0.3,
+                                    label="Integrated area"
+                                )
+
+                                y_label = "CO₂ adsorbed fraction"
+
+                            ax3.axvline(
+                                adsorption_start_plot,
+                                linestyle="--",
+                                label="Adsorption start"
+                            )
+
+                            ax3.axvline(
+                                adsorption_end_plot,
+                                linestyle="--",
+                                label="Adsorption end"
+                            )
+
+                            ax3.set_xlabel(graph_time_label)
+                            ax3.set_ylabel(y_label)
+                            ax3.set_title("Capacity Integration Area")
+                            ax3.grid(True)
+                            ax3.legend()
+
+                            st.pyplot(fig3)
+
+                    # ---------------------------------------------------------
+                    # MULTI CYCLE MODE
+                    # ---------------------------------------------------------
 
                     else:
-                        ax3.plot(
-                            df[graph_time_col],
-                            df["CO2 Adsorbed Fraction"],
-                            label="1 - baseline-corrected CO₂ C/C₀"
+                        st.write("Enter the adsorption start and end times for each cycle.")
+                        st.caption("Times should be entered in minutes, even if the graph is displayed in seconds.")
+
+                        default_cycle_df = pd.DataFrame({
+                            "Cycle": [1, 2],
+                            "Adsorption start time (min)": [0.0, min(max_time, max_time / 2)],
+                            "Adsorption end time (min)": [min(max_time, max_time / 3), max_time]
+                        })
+
+                        cycle_table = st.data_editor(
+                            default_cycle_df,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            column_config={
+                                "Cycle": st.column_config.NumberColumn(
+                                    "Cycle",
+                                    min_value=1,
+                                    step=1
+                                ),
+                                "Adsorption start time (min)": st.column_config.NumberColumn(
+                                    "Adsorption start time (min)",
+                                    min_value=0.0,
+                                    max_value=max_time,
+                                    step=0.1
+                                ),
+                                "Adsorption end time (min)": st.column_config.NumberColumn(
+                                    "Adsorption end time (min)",
+                                    min_value=0.0,
+                                    max_value=max_time,
+                                    step=0.1
+                                )
+                            }
                         )
 
-                        ax3.fill_between(
-                            integration_df[graph_time_col],
-                            integration_df["CO2 Adsorbed Fraction"],
-                            alpha=0.3,
-                            label="Integrated area"
-                        )
+                        cycle_results = []
 
-                    ax3.axvline(
-                        adsorption_start_plot,
-                        linestyle="--",
-                        label="Adsorption start"
-                    )
+                        for _, row in cycle_table.iterrows():
+                            cycle_number = row["Cycle"]
+                            start_time = row["Adsorption start time (min)"]
+                            end_time = row["Adsorption end time (min)"]
 
-                    ax3.axvline(
-                        adsorption_end_plot,
-                        linestyle="--",
-                        label="Adsorption end"
-                    )
+                            if pd.isna(cycle_number) or pd.isna(start_time) or pd.isna(end_time):
+                                continue
 
-                    ax3.set_xlabel(graph_time_label)
-                    ax3.set_ylabel(y_label)
-                    ax3.set_title("Capacity Integration Area")
-                    ax3.grid(True)
-                    ax3.legend()
+                            if end_time <= start_time:
+                                continue
 
-                    st.pyplot(fig3)
+                            result = calculate_cycle_capacity(
+                                df=df,
+                                start_time=float(start_time),
+                                end_time=float(end_time),
+                                capacity_method=capacity_method,
+                                co2_signal_col=co2_signal_col,
+                                co2eq_signal=co2eq_signal,
+                                total_flow_sccm=total_flow_sccm,
+                                co2_percent=co2_percent,
+                                sample_mass_mg=sample_mass_mg,
+                                molar_volume_ml_per_mol=molar_volume_ml_per_mol
+                            )
 
-                    st.info(
-                        "The graph can now be displayed in minutes or seconds. "
-                        "The capacity calculation still uses the selected adsorption start/end times "
-                        "internally in minutes, with seconds used where needed for the Excel-style method."
-                    )
+                            if result is None:
+                                continue
+
+                            cycle_results.append({
+                                "Cycle": int(cycle_number),
+                                "Start Time (min)": result["start_time_min"],
+                                "End Time (min)": result["end_time_min"],
+                                "Duration (min)": result["duration_min"],
+                                "Integrated Area (min)": result["area_min"],
+                                "Adsorbed CO₂ (mmol)": result["adsorbed_mol"] * 1000,
+                                "Capacity (mmol/g)": result["capacity_mmol_g"],
+                                "Total CO₂ In (mol)": result["total_co2_in_mol"],
+                                "CO₂ Out (mol)": result["co2_out_mol"]
+                            })
+
+                        if not cycle_results:
+                            st.warning("No valid cycles found. Make sure each cycle has an end time greater than its start time.")
+                        else:
+                            results_df = pd.DataFrame(cycle_results)
+                            results_df = results_df.sort_values("Cycle").reset_index(drop=True)
+
+                            first_capacity = results_df["Capacity (mmol/g)"].iloc[0]
+
+                            if first_capacity != 0:
+                                results_df["Retention vs Cycle 1 (%)"] = (
+                                    results_df["Capacity (mmol/g)"] / first_capacity * 100
+                                )
+                            else:
+                                results_df["Retention vs Cycle 1 (%)"] = np.nan
+
+                            display_df = results_df.copy()
+
+                            round_cols = [
+                                "Start Time (min)",
+                                "End Time (min)",
+                                "Duration (min)",
+                                "Integrated Area (min)",
+                                "Adsorbed CO₂ (mmol)",
+                                "Capacity (mmol/g)",
+                                "Retention vs Cycle 1 (%)"
+                            ]
+
+                            for col in round_cols:
+                                display_df[col] = display_df[col].round(3)
+
+                            st.subheader("Multi-Cycle Capacity Results")
+                            st.dataframe(display_df, use_container_width=True)
+
+                            avg_capacity = results_df["Capacity (mmol/g)"].mean()
+                            std_capacity = results_df["Capacity (mmol/g)"].std()
+
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                st.metric("Average Capacity", f"{avg_capacity:.3f} mmol/g")
+
+                            with col2:
+                                if pd.isna(std_capacity):
+                                    st.metric("Capacity Std. Dev.", "N/A")
+                                else:
+                                    st.metric("Capacity Std. Dev.", f"{std_capacity:.3f} mmol/g")
+
+                            with col3:
+                                final_retention = results_df["Retention vs Cycle 1 (%)"].iloc[-1]
+                                st.metric("Final Retention", f"{final_retention:.3f}%")
+
+                            fig4, ax4 = plt.subplots(figsize=(10, 5))
+
+                            ax4.plot(
+                                results_df["Cycle"],
+                                results_df["Capacity (mmol/g)"],
+                                marker="o"
+                            )
+
+                            ax4.set_xlabel("Cycle")
+                            ax4.set_ylabel("Capacity (mmol/g)")
+                            ax4.set_title("Capacity vs Cycle")
+                            ax4.grid(True)
+
+                            st.pyplot(fig4)
+
+                            fig5, ax5 = plt.subplots(figsize=(10, 5))
+
+                            if capacity_method == "Excel-style CO₂ in/out method":
+                                ax5.plot(
+                                    df[graph_time_col],
+                                    (df[co2_signal_col] / co2eq_signal).clip(lower=0),
+                                    label=f"Excel-style CO₂ C/C₀: {co2_signal_col}/{co2eq_signal:.3g}"
+                                )
+
+                                y_label = "Raw CO₂ C/C₀"
+
+                            elif capacity_method == "Area between N₂ and CO₂ curves":
+                                ax5.plot(
+                                    df[graph_time_col],
+                                    df["N2 C/C0 Plot"],
+                                    label=f"N₂ / tracer: {n2_signal_col}"
+                                )
+
+                                ax5.plot(
+                                    df[graph_time_col],
+                                    df["CO2 C/C0 Plot"],
+                                    label=f"CO₂: {co2_signal_col}"
+                                )
+
+                                y_label = "Normalized signal"
+
+                            else:
+                                ax5.plot(
+                                    df[graph_time_col],
+                                    df["CO2 Adsorbed Fraction"],
+                                    label="1 - baseline-corrected CO₂ C/C₀"
+                                )
+
+                                y_label = "CO₂ adsorbed fraction"
+
+                            for _, row in results_df.iterrows():
+                                start_plot = convert_time_for_plot(
+                                    row["Start Time (min)"],
+                                    graph_time_unit
+                                )
+
+                                end_plot = convert_time_for_plot(
+                                    row["End Time (min)"],
+                                    graph_time_unit
+                                )
+
+                                ax5.axvspan(
+                                    start_plot,
+                                    end_plot,
+                                    alpha=0.15
+                                )
+
+                                ax5.axvline(
+                                    start_plot,
+                                    linestyle="--",
+                                    alpha=0.6
+                                )
+
+                                ax5.axvline(
+                                    end_plot,
+                                    linestyle="--",
+                                    alpha=0.6
+                                )
+
+                            ax5.set_xlabel(graph_time_label)
+                            ax5.set_ylabel(y_label)
+                            ax5.set_title("Selected Adsorption Cycles")
+                            ax5.grid(True)
+                            ax5.legend()
+
+                            st.pyplot(fig5)
+
+                            csv_results = results_df.to_csv(index=False).encode("utf-8")
+
+                            st.download_button(
+                                label="Download multi-cycle results CSV",
+                                data=csv_results,
+                                file_name="multi_cycle_capacity_results.csv",
+                                mime="text/csv"
+                            )
 
             except Exception as norm_error:
                 st.error(f"Something went wrong during normalization: {norm_error}")
