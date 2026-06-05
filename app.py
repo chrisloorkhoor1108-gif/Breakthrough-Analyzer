@@ -109,7 +109,7 @@ if uploaded_file is not None:
 
         st.pyplot(fig)
 
-                st.subheader("Normalize Breakthrough Curve")
+        st.subheader("Normalize Breakthrough Curve")
 
         if "Mass 44" in df.columns and "Elapsed Time (min)" in df.columns:
             signal_col = st.selectbox(
