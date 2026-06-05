@@ -335,7 +335,7 @@ if uploaded_file is not None:
                     adsorbed_fraction = integration_df["Adsorbed Fraction"].to_numpy()
 
                     # Area has units of minutes because adsorbed fraction is dimensionless.
-                    area_min = np.trapz(adsorbed_fraction, time_min)
+                   area_min = np.trapezoid(adsorbed_fraction, time_min)
 
                     co2_flow_sccm = total_flow_sccm * (co2_percent / 100)
                     co2_mol_per_min = co2_flow_sccm / molar_volume_ml_per_mol
