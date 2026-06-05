@@ -109,6 +109,70 @@ if uploaded_file is not None:
 
         st.pyplot(fig)
 
+                st.subheader("Normalize Breakthrough Curve")
+
+        if "Mass 44" in df.columns and "Elapsed Time (min)" in df.columns:
+            signal_col = st.selectbox(
+                "Select CO₂ signal column for normalization",
+                mass_columns,
+                index=mass_columns.index("Mass 44") if "Mass 44" in mass_columns else 0
+            )
+
+            max_time = float(df["Elapsed Time (min)"].max())
+
+            st.write("Choose time ranges for baseline and final outlet concentration.")
+
+            baseline_range = st.slider(
+                "Baseline region before CO₂ breakthrough, min",
+                min_value=0.0,
+                max_value=max_time,
+                value=(0.0, min(1.0, max_time)),
+                step=0.1
+            )
+
+            c0_range = st.slider(
+                "Final steady C₀ region, min",
+                min_value=0.0,
+                max_value=max_time,
+                value=(max(0.0, max_time - 1.0), max_time),
+                step=0.1
+            )
+
+            baseline_mask = (
+                (df["Elapsed Time (min)"] >= baseline_range[0]) &
+                (df["Elapsed Time (min)"] <= baseline_range[1])
+            )
+
+            c0_mask = (
+                (df["Elapsed Time (min)"] >= c0_range[0]) &
+                (df["Elapsed Time (min)"] <= c0_range[1])
+            )
+
+            baseline = df.loc[baseline_mask, signal_col].mean()
+            c0 = df.loc[c0_mask, signal_col].mean()
+
+            df["C/C0"] = (df[signal_col] - baseline) / (c0 - baseline)
+            df["C/C0"] = df["C/C0"].clip(lower=0, upper=1.2)
+
+            st.write(f"Baseline = `{baseline:.4g}`")
+            st.write(f"C₀ = `{c0:.4g}`")
+
+            fig2, ax2 = plt.subplots(figsize=(10, 5))
+            ax2.plot(df["Elapsed Time (min)"], df["C/C0"])
+            ax2.axhline(0.05, linestyle="--", label="5% breakthrough")
+            ax2.axhline(0.50, linestyle="--", label="50% breakthrough")
+            ax2.axhline(0.95, linestyle="--", label="95% saturation")
+            ax2.set_xlabel("Elapsed Time (min)")
+            ax2.set_ylabel("C/C₀")
+            ax2.set_title(f"Normalized Breakthrough Curve: {signal_col}")
+            ax2.grid(True)
+            ax2.legend()
+
+            st.pyplot(fig2)
+
+        else:
+            st.warning("Mass 44 or elapsed time was not found in this file.")
+
         st.subheader("Basic Signal Information")
 
         col1, col2, col3 = st.columns(3)
