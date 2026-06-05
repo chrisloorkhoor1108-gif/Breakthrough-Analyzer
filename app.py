@@ -95,7 +95,7 @@ def normalize_signal(df, signal_col, baseline_range, c0_range):
 
 def find_threshold_time(df, threshold):
     """
-    Finds the first elapsed time where C/C0 reaches or exceeds a threshold.
+    Finds the first elapsed time where CO2 C/C0 reaches or exceeds a threshold.
     """
     crossed = df[df["CO2 C/C0"] >= threshold]
 
@@ -219,7 +219,7 @@ if uploaded_file is not None:
                 df["CO2 C/C0 Plot"] = df["CO2 C/C0"].clip(lower=0, upper=1.2)
                 df["N2 C/C0 Plot"] = df["N2 C/C0"].clip(lower=0, upper=1.2)
 
-                # Original simple method:
+                # Simple CO2-only method:
                 # area = ∫(1 - CO2 C/C0) dt
                 df["CO2 Adsorbed Fraction"] = (1 - df["CO2 C/C0"]).clip(lower=0, upper=1)
 
@@ -372,25 +372,41 @@ if uploaded_file is not None:
                     )
                 )
 
-                st.write("Choose when CO₂ actually entered the bed and what range to integrate.")
+                st.write("Choose when adsorption starts and ends.")
 
-                co2_start_time = st.number_input(
-                    "CO₂ inlet start time, min",
-                    min_value=0.0,
-                    max_value=max_time,
-                    value=0.0,
-                    step=0.1,
-                    help=(
-                        "Set this to the time when CO₂ was actually switched into the bed. "
-                        "Time before this will not count toward capacity."
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    co2_start_time = st.number_input(
+                        "Adsorption start time, min",
+                        min_value=0.0,
+                        max_value=max_time,
+                        value=0.0,
+                        step=0.1,
+                        help=(
+                            "Set this to the time when CO₂ actually started entering the bed. "
+                            "Time before this will not count toward capacity."
+                        )
                     )
-                )
+
+                with col2:
+                    adsorption_end_time = st.number_input(
+                        "Adsorption end time, min",
+                        min_value=co2_start_time,
+                        max_value=max_time,
+                        value=max_time,
+                        step=0.1,
+                        help=(
+                            "Set this to the time when adsorption ended. "
+                            "Time after this will not count toward capacity."
+                        )
+                    )
 
                 integration_range = st.slider(
-                    "Capacity integration range, min",
+                    "Fine-tune capacity integration range, min",
                     min_value=co2_start_time,
-                    max_value=max_time,
-                    value=(co2_start_time, max_time),
+                    max_value=adsorption_end_time,
+                    value=(co2_start_time, adsorption_end_time),
                     step=0.1
                 )
 
@@ -401,7 +417,7 @@ if uploaded_file is not None:
 
                 integration_df = df.loc[integration_mask].copy()
 
-                # Correct time so that CO₂ inlet start becomes t = 0 for capacity calculation.
+                # Correct time so that adsorption start becomes t = 0 for capacity calculation.
                 integration_df["Corrected Time (min)"] = (
                     integration_df["Elapsed Time (min)"] - co2_start_time
                 )
@@ -414,6 +430,8 @@ if uploaded_file is not None:
                     st.warning("CO₂ concentration must be greater than 0.")
                 elif sample_mass_mg <= 0:
                     st.warning("Sample mass must be greater than 0.")
+                elif adsorption_end_time <= co2_start_time:
+                    st.warning("Adsorption end time must be after adsorption start time.")
                 else:
                     time_min = integration_df["Corrected Time (min)"].to_numpy()
 
@@ -470,6 +488,12 @@ if uploaded_file is not None:
 
                     st.write(f"Total molar flow: `{total_mol_per_min:.3e} mol/min`")
                     st.write(f"CO₂ inlet molar flow: `{co2_mol_per_min:.3e} mol/min`")
+                    st.write(f"Adsorption start: `{co2_start_time:.3f} min`")
+                    st.write(f"Adsorption end: `{adsorption_end_time:.3f} min`")
+                    st.write(
+                        f"Integrated duration: "
+                        f"`{integration_range[1] - integration_range[0]:.3f} min`"
+                    )
 
                     st.caption(
                         f"Equivalent CO₂ flow = {equivalent_co2_sccm:.3g} sccm "
@@ -519,7 +543,13 @@ if uploaded_file is not None:
                     ax3.axvline(
                         co2_start_time,
                         linestyle="--",
-                        label="CO₂ inlet start"
+                        label="Adsorption start"
+                    )
+
+                    ax3.axvline(
+                        adsorption_end_time,
+                        linestyle="--",
+                        label="Adsorption end"
                     )
 
                     ax3.set_xlabel("Elapsed Time (min)")
@@ -531,10 +561,9 @@ if uploaded_file is not None:
                     st.pyplot(fig3)
 
                     st.info(
-                        "Note: This calculation now includes the option to integrate the area "
-                        "between the normalized N₂/tracer curve and the normalized CO₂ curve. "
-                        "For publication-quality results, you may still want to compare against "
-                        "a blank/dead-volume run."
+                        "This calculation integrates only between the selected adsorption start "
+                        "and adsorption end times. For publication-quality results, you may still "
+                        "want to compare against a blank/dead-volume run."
                     )
 
             except Exception as norm_error:
