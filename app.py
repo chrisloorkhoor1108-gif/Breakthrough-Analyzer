@@ -63,11 +63,41 @@ def read_mass_spec_txt(uploaded_file):
     return df
 
 
+def normalize_signal(df, signal_col, baseline_range, c0_range):
+    """
+    Normalizes a selected mass spec signal using:
+    normalized = (signal - baseline) / (c0 - baseline)
+    """
+
+    baseline_mask = (
+        (df["Elapsed Time (min)"] >= baseline_range[0]) &
+        (df["Elapsed Time (min)"] <= baseline_range[1])
+    )
+
+    c0_mask = (
+        (df["Elapsed Time (min)"] >= c0_range[0]) &
+        (df["Elapsed Time (min)"] <= c0_range[1])
+    )
+
+    baseline = df.loc[baseline_mask, signal_col].mean()
+    c0 = df.loc[c0_mask, signal_col].mean()
+
+    if pd.isna(baseline) or pd.isna(c0):
+        raise ValueError(f"Could not calculate baseline or C₀ for {signal_col}.")
+
+    if c0 == baseline:
+        raise ValueError(f"C₀ and baseline are equal for {signal_col}, so it cannot be normalized.")
+
+    normalized = (df[signal_col] - baseline) / (c0 - baseline)
+
+    return normalized, baseline, c0
+
+
 def find_threshold_time(df, threshold):
     """
     Finds the first elapsed time where C/C0 reaches or exceeds a threshold.
     """
-    crossed = df[df["C/C0"] >= threshold]
+    crossed = df[df["CO2 C/C0"] >= threshold]
 
     if crossed.empty:
         return None
@@ -132,21 +162,31 @@ if uploaded_file is not None:
         # NORMALIZED BREAKTHROUGH CURVE SECTION
         # ---------------------------------------------------------
 
-        st.subheader("Normalize Breakthrough Curve")
+        st.subheader("Normalize Breakthrough Curves")
 
         if "Mass 44" in df.columns and "Elapsed Time (min)" in df.columns:
-            signal_col = st.selectbox(
-                "Select CO₂ signal column for normalization",
-                mass_columns,
-                index=mass_columns.index("Mass 44") if "Mass 44" in mass_columns else 0
-            )
+            col1, col2 = st.columns(2)
+
+            with col1:
+                co2_signal_col = st.selectbox(
+                    "Select CO₂ signal column",
+                    mass_columns,
+                    index=mass_columns.index("Mass 44") if "Mass 44" in mass_columns else 0
+                )
+
+            with col2:
+                n2_signal_col = st.selectbox(
+                    "Select N₂ / inert tracer signal column",
+                    mass_columns,
+                    index=mass_columns.index("Mass 28") if "Mass 28" in mass_columns else 0
+                )
 
             max_time = float(df["Elapsed Time (min)"].max())
 
             st.write("Choose time ranges for baseline and final outlet concentration.")
 
             baseline_range = st.slider(
-                "Baseline region before CO₂ breakthrough, min",
+                "Baseline region before breakthrough, min",
                 min_value=0.0,
                 max_value=max_time,
                 value=(0.0, min(1.0, max_time)),
@@ -161,50 +201,70 @@ if uploaded_file is not None:
                 step=0.1
             )
 
-            baseline_mask = (
-                (df["Elapsed Time (min)"] >= baseline_range[0]) &
-                (df["Elapsed Time (min)"] <= baseline_range[1])
-            )
+            try:
+                df["CO2 C/C0"], co2_baseline, co2_c0 = normalize_signal(
+                    df,
+                    co2_signal_col,
+                    baseline_range,
+                    c0_range
+                )
 
-            c0_mask = (
-                (df["Elapsed Time (min)"] >= c0_range[0]) &
-                (df["Elapsed Time (min)"] <= c0_range[1])
-            )
+                df["N2 C/C0"], n2_baseline, n2_c0 = normalize_signal(
+                    df,
+                    n2_signal_col,
+                    baseline_range,
+                    c0_range
+                )
 
-            baseline = df.loc[baseline_mask, signal_col].mean()
-            c0 = df.loc[c0_mask, signal_col].mean()
+                df["CO2 C/C0 Plot"] = df["CO2 C/C0"].clip(lower=0, upper=1.2)
+                df["N2 C/C0 Plot"] = df["N2 C/C0"].clip(lower=0, upper=1.2)
 
-            if c0 == baseline:
-                st.error("C₀ and baseline are equal, so C/C₀ cannot be calculated.")
-            else:
-                df["C/C0"] = (df[signal_col] - baseline) / (c0 - baseline)
+                # Original simple method:
+                # area = ∫(1 - CO2 C/C0) dt
+                df["CO2 Adsorbed Fraction"] = (1 - df["CO2 C/C0"]).clip(lower=0, upper=1)
 
-                # For plotting, allow a little above 1 so overshoot/noise is visible.
-                df["C/C0 Plot"] = df["C/C0"].clip(lower=0, upper=1.2)
-
-                # For capacity, use physically meaningful adsorption term.
-                # Adsorbed fraction = 1 - C/C0, clipped between 0 and 1.
-                df["Adsorbed Fraction"] = (1 - df["C/C0"]).clip(lower=0, upper=1)
+                # N2 tracer method:
+                # area = ∫(N2 normalized curve - CO2 normalized curve) dt
+                df["N2-CO2 Difference"] = (df["N2 C/C0"] - df["CO2 C/C0"]).clip(lower=0)
 
                 t_05 = find_threshold_time(df, 0.05)
                 t_50 = find_threshold_time(df, 0.50)
                 t_95 = find_threshold_time(df, 0.95)
 
-                st.write(f"Baseline = `{baseline:.3g}`")
-                st.write(f"C₀ = `{c0:.3g}`")
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.write(f"CO₂ baseline = `{co2_baseline:.3g}`")
+                    st.write(f"CO₂ C₀ = `{co2_c0:.3g}`")
+
+                with col2:
+                    st.write(f"N₂ baseline = `{n2_baseline:.3g}`")
+                    st.write(f"N₂ C₀ = `{n2_c0:.3g}`")
 
                 show_threshold_lines = st.checkbox(
                     "Show 5%, 50%, and 95% breakthrough lines",
                     value=False
                 )
 
+                show_n2_curve = st.checkbox(
+                    "Show normalized N₂ curve on breakthrough plot",
+                    value=True
+                )
+
                 fig2, ax2 = plt.subplots(figsize=(10, 5))
 
                 ax2.plot(
                     df["Elapsed Time (min)"],
-                    df["C/C0 Plot"],
-                    label="C/C₀"
+                    df["CO2 C/C0 Plot"],
+                    label=f"CO₂: {co2_signal_col}"
                 )
+
+                if show_n2_curve:
+                    ax2.plot(
+                        df["Elapsed Time (min)"],
+                        df["N2 C/C0 Plot"],
+                        label=f"N₂ / tracer: {n2_signal_col}"
+                    )
 
                 if show_threshold_lines:
                     ax2.axhline(0.05, linestyle="--", label="5% breakthrough")
@@ -219,8 +279,8 @@ if uploaded_file is not None:
                         ax2.axvline(t_95, linestyle="--")
 
                 ax2.set_xlabel("Elapsed Time (min)")
-                ax2.set_ylabel("C/C₀")
-                ax2.set_title(f"Normalized Breakthrough Curve: {signal_col}")
+                ax2.set_ylabel("Normalized signal")
+                ax2.set_title("Normalized Breakthrough Curves")
                 ax2.grid(True)
                 ax2.legend()
 
@@ -254,10 +314,25 @@ if uploaded_file is not None:
 
                 st.subheader("CO₂ Adsorption Capacity Calculation")
 
-                st.write(
-                    "Capacity is calculated from the normalized breakthrough curve using "
-                    "`∫(1 - C/C₀) dt`."
+                capacity_method = st.selectbox(
+                    "Capacity calculation method",
+                    [
+                        "Area between N₂ and CO₂ curves",
+                        "CO₂ only: ∫(1 - C/C₀) dt"
+                    ],
+                    index=0
                 )
+
+                if capacity_method == "Area between N₂ and CO₂ curves":
+                    st.write(
+                        "Capacity is calculated using "
+                        "`∫(N₂ normalized curve - CO₂ normalized curve) dt`."
+                    )
+                else:
+                    st.write(
+                        "Capacity is calculated using "
+                        "`∫(1 - CO₂ C/C₀) dt`."
+                    )
 
                 col1, col2, col3 = st.columns(3)
 
@@ -289,21 +364,33 @@ if uploaded_file is not None:
                 molar_volume_ml_per_mol = st.number_input(
                     "Molar volume used for sccm conversion, mL/mol",
                     min_value=1.0,
-                    value=22414.0,
+                    value=47000.0,
                     step=1.0,
                     help=(
-                        "22414 mL/mol assumes standard molar volume near STP. "
-                        "Change this if your lab uses a different reference condition."
+                        "Use 47000 mL/mol if that matches your experimental flow conversion. "
+                        "Use 22414 mL/mol for standard molar volume near STP."
                     )
                 )
 
-                st.write("Choose the time range to integrate for capacity.")
+                st.write("Choose when CO₂ actually entered the bed and what range to integrate.")
+
+                co2_start_time = st.number_input(
+                    "CO₂ inlet start time, min",
+                    min_value=0.0,
+                    max_value=max_time,
+                    value=0.0,
+                    step=0.1,
+                    help=(
+                        "Set this to the time when CO₂ was actually switched into the bed. "
+                        "Time before this will not count toward capacity."
+                    )
+                )
 
                 integration_range = st.slider(
                     "Capacity integration range, min",
-                    min_value=0.0,
+                    min_value=co2_start_time,
                     max_value=max_time,
-                    value=(0.0, max_time),
+                    value=(co2_start_time, max_time),
                     step=0.1
                 )
 
@@ -314,6 +401,11 @@ if uploaded_file is not None:
 
                 integration_df = df.loc[integration_mask].copy()
 
+                # Correct time so that CO₂ inlet start becomes t = 0 for capacity calculation.
+                integration_df["Corrected Time (min)"] = (
+                    integration_df["Elapsed Time (min)"] - co2_start_time
+                )
+
                 if len(integration_df) < 2:
                     st.warning("Not enough data points in the selected integration range.")
                 elif total_flow_sccm <= 0:
@@ -323,11 +415,19 @@ if uploaded_file is not None:
                 elif sample_mass_mg <= 0:
                     st.warning("Sample mass must be greater than 0.")
                 else:
-                    time_min = integration_df["Elapsed Time (min)"].to_numpy()
-                    adsorbed_fraction = integration_df["Adsorbed Fraction"].to_numpy()
+                    time_min = integration_df["Corrected Time (min)"].to_numpy()
 
-                    # Area has units of minutes because adsorbed fraction is dimensionless.
-                    area_min = np.trapezoid(adsorbed_fraction, time_min)
+                    if capacity_method == "Area between N₂ and CO₂ curves":
+                        integration_signal = integration_df["N2-CO2 Difference"].to_numpy()
+                        area_label = "N₂ - CO₂"
+                        y_label = "N₂ - CO₂ normalized difference"
+                    else:
+                        integration_signal = integration_df["CO2 Adsorbed Fraction"].to_numpy()
+                        area_label = "1 - CO₂ C/C₀"
+                        y_label = "CO₂ adsorbed fraction"
+
+                    # Area has units of minutes because the integrated signal is dimensionless.
+                    area_min = np.trapezoid(integration_signal, time_min)
 
                     # -----------------------------------------------------
                     # Molar flow calculation
@@ -378,21 +478,52 @@ if uploaded_file is not None:
 
                     fig3, ax3 = plt.subplots(figsize=(10, 5))
 
-                    ax3.plot(
-                        df["Elapsed Time (min)"],
-                        df["Adsorbed Fraction"],
-                        label="1 - C/C₀"
-                    )
+                    if capacity_method == "Area between N₂ and CO₂ curves":
+                        ax3.plot(
+                            df["Elapsed Time (min)"],
+                            df["N2 C/C0 Plot"],
+                            label=f"N₂ / tracer: {n2_signal_col}"
+                        )
 
-                    ax3.fill_between(
-                        integration_df["Elapsed Time (min)"],
-                        integration_df["Adsorbed Fraction"],
-                        alpha=0.3,
-                        label="Integrated area"
+                        ax3.plot(
+                            df["Elapsed Time (min)"],
+                            df["CO2 C/C0 Plot"],
+                            label=f"CO₂: {co2_signal_col}"
+                        )
+
+                        ax3.fill_between(
+                            integration_df["Elapsed Time (min)"],
+                            integration_df["CO2 C/C0"].clip(lower=0, upper=1.2),
+                            integration_df["N2 C/C0"].clip(lower=0, upper=1.2),
+                            where=(
+                                integration_df["N2 C/C0"] >= integration_df["CO2 C/C0"]
+                            ),
+                            alpha=0.3,
+                            label="Integrated area between curves"
+                        )
+
+                    else:
+                        ax3.plot(
+                            df["Elapsed Time (min)"],
+                            df["CO2 Adsorbed Fraction"],
+                            label=area_label
+                        )
+
+                        ax3.fill_between(
+                            integration_df["Elapsed Time (min)"],
+                            integration_df["CO2 Adsorbed Fraction"],
+                            alpha=0.3,
+                            label="Integrated area"
+                        )
+
+                    ax3.axvline(
+                        co2_start_time,
+                        linestyle="--",
+                        label="CO₂ inlet start"
                     )
 
                     ax3.set_xlabel("Elapsed Time (min)")
-                    ax3.set_ylabel("Adsorbed Fraction")
+                    ax3.set_ylabel(y_label)
                     ax3.set_title("Capacity Integration Area")
                     ax3.grid(True)
                     ax3.legend()
@@ -400,9 +531,14 @@ if uploaded_file is not None:
                     st.pyplot(fig3)
 
                     st.info(
-                        "Note: This calculation does not yet include blank/dead-volume correction. "
-                        "For publication-quality results, you may eventually want to subtract a blank run."
+                        "Note: This calculation now includes the option to integrate the area "
+                        "between the normalized N₂/tracer curve and the normalized CO₂ curve. "
+                        "For publication-quality results, you may still want to compare against "
+                        "a blank/dead-volume run."
                     )
+
+            except Exception as norm_error:
+                st.error(f"Something went wrong during normalization: {norm_error}")
 
         else:
             st.warning("Mass 44 or elapsed time was not found in this file.")
